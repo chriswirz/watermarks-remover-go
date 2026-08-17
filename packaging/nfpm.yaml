@@ -1,0 +1,29 @@
+# nfpm config used by the GitHub Actions pipeline to build .deb and .rpm
+# packages. ARCH and PKG_VERSION are supplied by the pipeline, which also
+# stages the binary for the target architecture at packaging/wmr (nfpm does
+# not expand environment variables inside contents paths).
+name: wmr
+arch: ${ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: utils
+priority: optional
+maintainer: watermarks-remover-go maintainers
+description: |
+  Find and remove AI provenance marks from local text files.
+  wmr strips invisible and format Unicode, space homoglyphs and bidi
+  controls, clears generator metadata from Markdown frontmatter and HTML,
+  and can remove whole attribution lines by pattern. It preserves
+  load-bearing invisibles such as emoji joiners and script joiners unless
+  told otherwise, and refuses binary input rather than corrupting it.
+homepage: https://github.com/chriswirz/watermarks-remover-go
+license: MIT
+contents:
+  - src: packaging/wmr
+    dst: /usr/bin/wmr
+    file_info:
+      mode: 0755
+  - src: README.md
+    dst: /usr/share/doc/wmr/README.md
+    file_info:
+      mode: 0644
