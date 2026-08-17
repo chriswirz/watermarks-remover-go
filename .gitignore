@@ -1,0 +1,17 @@
+# Built binaries at the repo root only. These patterns must stay anchored with
+# a leading slash: a bare "wmr" also matches the cmd/wmr source directory and
+# silently excludes the entire main package from the repository.
+/wmr
+/wmr.exe
+/dist/
+/staging/
+/out/
+
+# Binary staged for nfpm by the packaging job. It is a copy of a built
+# artifact, not source, and committing it would put a Linux executable in the
+# tree that silently goes stale.
+/packaging/wmr
+
+# Tool output
+*.cleaned.*
+*.bak

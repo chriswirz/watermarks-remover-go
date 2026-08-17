@@ -1,0 +1,175 @@
+name: build-and-publish
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: windows, goarch: arm64, ext: .exe }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git describe needs the tags, which a shallow clone omits.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          version="$(git describe --tags --always)"
+          name="wmr-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/${name}" ./cmd/wmr
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wmr-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, artifact: wmr-linux-amd64, bin: wmr-linux-amd64 }
+          - { os: macos-latest, artifact: wmr-darwin-arm64, bin: wmr-darwin-arm64 }
+          - { os: windows-latest, artifact: wmr-windows-amd64, bin: wmr-windows-amd64.exe }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+      - name: Exercise the built binary
+        run: |
+          set -euo pipefail
+          bin="dist/${{ matrix.bin }}"
+          chmod +x "$bin"
+          "$bin" version
+
+          # A zero-width space (U+200B) and a no-break space (U+00A0) as octal
+          # UTF-8 escapes. Writing the real codepoints here would leave an
+          # invisible payload in the workflow file that an editor, a linter or
+          # a copy-paste could silently drop, quietly disarming the test.
+          printf 'He\342\200\213llo\302\240world\n' > sample.txt
+
+          # inspect exits 1 when it finds marks; clean must then remove them.
+          if "$bin" inspect sample.txt; then
+            echo "inspect exited 0 on a marked file"
+            exit 1
+          fi
+          "$bin" clean sample.txt -o cleaned.txt
+          printf 'Hello world\n' > expected.txt
+          cmp cleaned.txt expected.txt
+          "$bin" inspect cleaned.txt
+
+          # Forcing ASCII: the curly quotes and the accent transliterate, the
+          # emoji and the CJK character drop. Same octal-escape reasoning as
+          # the payload above.
+          printf '\342\200\234Caf\303\251\342\200\235 \360\237\230\200 \344\270\255\n' > mixed.txt
+          "$bin" clean mixed.txt -visible ascii -o folded.txt
+          printf '"Cafe"  \n' > expected-ascii.txt
+          cmp folded.txt expected-ascii.txt
+
+  package:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wmr-linux-${{ matrix.arch }}
+          path: dist
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+      - name: Build .deb and .rpm
+        env:
+          ARCH: ${{ matrix.arch }}
+          # deb and rpm both need a numeric version; the git description of an
+          # untagged commit is not one.
+          PKG_VERSION: 0.0.${{ github.run_number }}
+        run: |
+          cp "dist/wmr-linux-${ARCH}" packaging/wmr
+          chmod +x packaging/wmr
+          mkdir -p out
+          nfpm package -f packaging/nfpm.yaml -p deb -t out/
+          nfpm package -f packaging/nfpm.yaml -p rpm -t out/
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wmr-packages-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: [build, smoke, package]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          find staging -type f -exec mv {} dist/ \;
+          cd dist && sha256sum * > SHA256SUMS
+          ls -l
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${{ github.run_number }}"
+          gh release create "$tag" dist/* \
+            --title "wmr $tag" \
+            --notes "Automated build of \`${{ github.sha }}\` from \`${{ github.ref_name }}\`." \
+            --latest
